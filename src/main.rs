@@ -1,4 +1,4 @@
-use std::ops::AddAssign;
+use std::{fmt::Display, ops::AddAssign};
 
 use eframe::egui;
 use egui::{ColorImage, Event, Rgba, TextureHandle, Ui};
@@ -9,6 +9,12 @@ use rayon::prelude::*;
 struct Complex<T> {
     r: T,
     i: T,
+}
+
+impl<T: Display> Display for Complex<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.3} + {:.3}i", self.r, self.i)
+    }
 }
 
 impl<T: Num + Copy> Complex<T> {
@@ -29,6 +35,12 @@ impl<T: Num> std::ops::Add<Complex<T>> for Complex<T> {
             r: self.r + rhs.r,
             i: self.i + rhs.i,
         }
+    }
+}
+
+impl<T: Num> PartialEq<Complex<T>> for Complex<T> {
+    fn eq(&self, other: &Complex<T>) -> bool {
+        self.r == other.r && self.i == other.i
     }
 }
 
@@ -77,26 +89,45 @@ impl<T: Num + Copy> std::ops::Mul<T> for Complex<T> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 enum IterResult<T> {
     Outside(usize),
     Inside(T),
 }
 
-const UNROLL: usize = 4;
+#[test]
+fn test_iterate() {
+    use IterResult::*;
+    let zero = Complex::new(0.0, 0.0);
+    assert_eq!(Outside(0), iterate(zero, Complex::new(2.0, 2.0), 10));
+    assert_eq!(Outside(1), iterate(zero, Complex::new(1.0, 1.0), 10));
+    assert!(matches!(
+        iterate(zero, Complex::new(0.0, 1.0), 10),
+        Inside(_)
+    ));
+}
 
-fn iterate<T>(c: Complex<T>, times: usize) -> IterResult<Complex<T>>
+const UNROLL: usize = 1;
+
+fn iterate<T>(mut z: Complex<T>, c: Complex<T>, times: usize) -> IterResult<Complex<T>>
 where
     T: Num + Copy + PartialOrd,
 {
-    let mut z = c.clone();
     for i in 0..(times / UNROLL) {
+        let last_z = z.clone();
         for _ in 0..UNROLL {
             // z = z^2 + c
             z = z * z + c;
         }
         if z.len_sq() > (T::one() + T::one()) {
-            return IterResult::Outside(i);
+            z = last_z;
+            for q in 0..UNROLL {
+                // z = z^2 + c
+                z = z * z + c;
+                if z.len_sq() > (T::one() + T::one()) {
+                    return IterResult::Outside(i * UNROLL + q);
+                }
+            }
         }
     }
 
@@ -112,12 +143,29 @@ fn main() {
     );
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Mode {
+    Julia,
+    Mandelbrot,
+}
+
+impl Mode {
+    fn next_mode(&self) -> Self {
+        match self {
+            Mode::Julia => Mode::Mandelbrot,
+            Mode::Mandelbrot => Mode::Julia,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ViewData {
     top_left: Complex<FL>,
     bottom_right: Complex<FL>,
     lighting_factor: f32,
     steps: usize,
+    julia_offset: Complex<FL>,
+    mode: Mode,
 }
 
 impl ViewData {
@@ -133,9 +181,23 @@ impl ViewData {
                         let cx = tl.r + (x as FL / x_size as FL) * (br.r - tl.r);
                         let cy = tl.i - (y as FL / y_size as FL) * (tl.i - br.i);
 
-                        let c = get_xy(Complex::new(cx, cy), self.steps, |q| {
-                            q.powf(1.0 / self.lighting_factor)
-                        });
+                        let lighting_func = |q: f32| (q * 10.0).rem_euclid(1.0).sqrt() * 0.75;
+
+                        let c = match self.mode {
+                            Mode::Julia => get_xy(
+                                Complex::new(cx, cy),
+                                self.julia_offset,
+                                self.steps,
+                                lighting_func,
+                            ),
+                            Mode::Mandelbrot => get_xy(
+                                Complex::new(0.0, 0.0),
+                                Complex::new(cx, cy),
+                                self.steps,
+                                lighting_func,
+                            ),
+                        };
+
                         c.to_srgba_unmultiplied()
                     })
                     .flatten()
@@ -188,12 +250,11 @@ impl MyApp {
     }
 }
 
-fn get_xy<F: Fn(f32) -> f32>(c: Complex<FL>, step_max: usize, f: F) -> Rgba {
-    //dbg!(&c);
-    match iterate(c, step_max) {
+fn get_xy<F: Fn(f32) -> f32>(z: Complex<FL>, c: Complex<FL>, step_max: usize, f: F) -> Rgba {
+    match iterate(z, c, step_max) {
         IterResult::Outside(steps) => {
             let pct = steps as f32 / step_max as f32;
-            Rgba::from_rgba_unmultiplied(f(pct), f(pct), 1.0, 1.0)
+            Rgba::from_rgba_unmultiplied(f(pct), f(pct), 0.0, 1.0)
         }
         IterResult::Inside(_final) => Rgba::from_rgba_unmultiplied(1.0, 1.0, 1.0, 1.0),
     }
@@ -205,11 +266,17 @@ impl Default for MyApp {
     fn default() -> Self {
         let top_left = Complex::new(-2.0, 1.0);
         let bottom_right = Complex::new(1.0, -1.0);
+        //let phi = (1.0 + (5.0 as FL).sqrt()) / 2.0;
+        //let phi = 1 - phi;
+        //let phi = 0.285;
+        let phi = 0.0;
         let view_data = ViewData {
+            mode: Mode::Mandelbrot,
+            julia_offset: Complex::new(phi, 0.0),
             lighting_factor: 2.0,
             top_left,
             bottom_right,
-            steps: 32,
+            steps: 128,
         };
 
         let view = view_data.generate_view([600, 400]);
@@ -241,7 +308,7 @@ impl eframe::App for MyApp {
                         ArrowLeft => {self.view_data.rel_move([-1.0, 0.0]); true}
                         ArrowRight => {self.view_data.rel_move([1.0, 0.0]); true}
                         Q => {self.view_data.rel_zoom(-1.0); true}
-                        E => {self.view_data.rel_zoom(1.0); true}
+                        E => {self.view_data.rel_zoom(0.5); true}
                         P => {dbg!(&self.view_data); false}
                         R => {
                             let top_left = Complex::new(-2.0, 1.0);
@@ -249,10 +316,15 @@ impl eframe::App for MyApp {
                             self.view_data = ViewData {
                                 top_left,
                                 bottom_right,
+                                julia_offset: Complex::new(0.0, 0.0),
                                 ..self.view_data
                             };
                             true
                         },
+                        M => {
+                            self.view_data.mode = self.view_data.mode.next_mode();
+                            true
+                        }
                         Escape => todo!(),
                         Tab => todo!(),
                         Backspace => todo!(),
@@ -294,17 +366,41 @@ impl eframe::App for MyApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.set_image(ui);
 
-            ui.add(egui::Slider::new(&mut self.view_data.steps, UNROLL..=1000).text("Steps"));
+            ui.add(egui::Slider::new(&mut self.view_data.steps, UNROLL..=10000).text("Steps"));
             ui.add(
                 egui::Slider::new(&mut self.view_data.lighting_factor, 0.5..=4.0).text("Lighting"),
             );
+
+            if self.view_data.mode == Mode::Julia {
+                ui.add(egui::Slider::new(&mut self.view_data.julia_offset.r, -1.0..=1.0).text("a"));
+                ui.add(egui::Slider::new(&mut self.view_data.julia_offset.i, -1.0..=1.0).text("b"));
+                ui.add(egui::Label::new(format!(
+                    "Julia Base: {}",
+                    self.view_data.julia_offset
+                )));
+                ui.add(egui::Label::new("Press M to enter Mandelbrot mode"));
+            } else {
+                ui.add(egui::Label::new("Press M to enter Julia mode"));
+            }
+            ui.add(egui::Label::new(format!(
+                "Top Left: {}",
+                self.view_data.top_left
+            )));
+            ui.add(egui::Label::new(format!(
+                "Bottom Right: {}",
+                self.view_data.bottom_right
+            )));
 
             if ui.button("Regen").clicked() {
                 self.next_frame = Some(self.view_data.generate_view([600, 400]));
             }
 
             let t = self.image_texture.as_ref().unwrap();
-            ui.image(t, t.size_vec2());
+            let img = ui.image(t, t.size_vec2());
+
+            if img.clicked() {
+                dbg!("Clicked");
+            }
         });
     }
 }
