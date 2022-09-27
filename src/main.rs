@@ -170,7 +170,7 @@ struct ViewData {
 
 impl ViewData {
     fn generate_view(&self, [x_size, y_size]: [usize; 2]) -> ColorImage {
-        let pixels: Vec<u8> = (0..y_size)
+        let raw_escapes: Vec<IterResult<Complex<FL>>> = (0..y_size)
             .into_par_iter()
             .map(|y| {
                 (0..x_size)
@@ -181,28 +181,45 @@ impl ViewData {
                         let cx = tl.r + (x as FL / x_size as FL) * (br.r - tl.r);
                         let cy = tl.i - (y as FL / y_size as FL) * (tl.i - br.i);
 
-                        let lighting_func = |q: f32| (q * 10.0).rem_euclid(1.0).sqrt() * 0.75;
-
-                        let c = match self.mode {
-                            Mode::Julia => get_xy(
-                                Complex::new(cx, cy),
-                                self.julia_offset,
-                                self.steps,
-                                lighting_func,
-                            ),
-                            Mode::Mandelbrot => get_xy(
-                                Complex::new(0.0, 0.0),
-                                Complex::new(cx, cy),
-                                self.steps,
-                                lighting_func,
-                            ),
+                        let iteration = match self.mode {
+                            Mode::Julia => {
+                                iterate(Complex::new(cx, cy), self.julia_offset, self.steps)
+                            }
+                            Mode::Mandelbrot => {
+                                iterate(Complex::new(0.0, 0.0), Complex::new(cx, cy), self.steps)
+                            }
                         };
 
-                        c.to_srgba_unmultiplied()
+                        iteration
                     })
-                    .flatten()
-                    .collect::<Vec<u8>>()
+                    .collect()
             })
+            .flatten()
+            .collect();
+
+        let average_escape: usize = raw_escapes
+            .iter()
+            .filter_map(|x| match x {
+                IterResult::Outside(q) => Some(q),
+                IterResult::Inside(q) => None,
+            })
+            .sum();
+
+        let average_escape = average_escape as f32 / (x_size * y_size) as f32;
+
+        //lighting func
+        let f = |q: f32| (q * 10.0).rem_euclid(1.0).sqrt() * 0.75;
+
+        let pixels: Vec<_> = raw_escapes
+            .into_iter()
+            .map(|q| match q {
+                IterResult::Outside(steps) => {
+                    let pct = steps as f32 / self.steps as f32;
+                    Rgba::from_rgba_unmultiplied(f(pct), f(pct), 0.0, 1.0)
+                }
+                IterResult::Inside(_final) => Rgba::from_rgba_unmultiplied(1.0, 1.0, 1.0, 1.0),
+            })
+            .map(|c| c.to_srgba_unmultiplied())
             .flatten()
             .collect();
 
@@ -396,11 +413,7 @@ impl eframe::App for MyApp {
             }
 
             let t = self.image_texture.as_ref().unwrap();
-            let img = ui.image(t, t.size_vec2());
-
-            if img.clicked() {
-                dbg!("Clicked");
-            }
+            ui.image(t, t.size_vec2());
         });
     }
 }
