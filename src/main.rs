@@ -1,8 +1,8 @@
 use std::{fmt::Display, ops::AddAssign};
 
 use eframe::egui;
-use egui::{ColorImage, Event, Rgba, TextureHandle, Ui};
-use num_traits::Num;
+use egui::{color::Hsva, Color32, ColorImage, Event, Rgba, TextureHandle, Ui};
+use num_traits::{Float, Num};
 use rayon::prelude::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -99,19 +99,45 @@ enum IterResult<T> {
 fn test_iterate() {
     use IterResult::*;
     let zero = Complex::new(0.0, 0.0);
-    assert_eq!(Outside(0), iterate(zero, Complex::new(2.0, 2.0), 10));
-    assert_eq!(Outside(1), iterate(zero, Complex::new(1.0, 1.0), 10));
+    assert_eq!(
+        Outside(0),
+        iterate::<1, f64>(zero, Complex::new(2.0, 2.0), 10)
+    );
+    assert_eq!(
+        Outside(1),
+        iterate::<1, f64>(zero, Complex::new(1.0, 1.0), 10)
+    );
     assert!(matches!(
-        iterate(zero, Complex::new(0.0, 1.0), 10),
+        iterate::<1, f64>(zero, Complex::new(0.0, 1.0), 10),
         Inside(_)
     ));
 }
 
-const UNROLL: usize = 1;
+#[test]
+fn test_all() {
+    use IterResult::*;
+    for x in -95..95 {
+        for y in -95..95 {
+            let z = Complex::new(0.0, 0.0);
+            let c = Complex::new(x as f64 / 100.0, y as f64 / 100.0);
 
-fn iterate<T>(mut z: Complex<T>, c: Complex<T>, times: usize) -> IterResult<Complex<T>>
+            let a = iterate::<4, f64>(z, c, 100);
+            let b = iterate::<1, f64>(z, c, 100);
+            match (a, b) {
+                (Outside(p), Outside(q)) => assert_eq!(p, q),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn iterate<const UNROLL: usize, T>(
+    mut z: Complex<T>,
+    c: Complex<T>,
+    times: usize,
+) -> IterResult<Complex<T>>
 where
-    T: Num + Copy + PartialOrd,
+    T: Float + Copy + PartialOrd + std::fmt::Display,
 {
     for i in 0..(times / UNROLL) {
         let last_z = z.clone();
@@ -119,12 +145,18 @@ where
             // z = z^2 + c
             z = z * z + c;
         }
-        if z.len_sq() > (T::one() + T::one()) {
+        if z.r.is_nan()
+            || z.len_sq() > (T::one() + T::one() + T::one() + T::one())
+            || z.len_sq() < T::from(0.00001).unwrap()
+        {
+            if UNROLL == 1 {
+                return IterResult::Outside(i);
+            }
+
             z = last_z;
             for q in 0..UNROLL {
-                // z = z^2 + c
                 z = z * z + c;
-                if z.len_sq() > (T::one() + T::one()) {
+                if z.len_sq() > (T::one() + T::one() + T::one() + T::one()) {
                     return IterResult::Outside(i * UNROLL + q);
                 }
             }
@@ -183,40 +215,67 @@ impl ViewData {
 
                         let iteration = match self.mode {
                             Mode::Julia => {
-                                iterate(Complex::new(cx, cy), self.julia_offset, self.steps)
+                                iterate::<8, _>(Complex::new(cx, cy), self.julia_offset, self.steps)
                             }
-                            Mode::Mandelbrot => {
-                                iterate(Complex::new(0.0, 0.0), Complex::new(cx, cy), self.steps)
-                            }
+                            Mode::Mandelbrot => iterate::<32, _>(
+                                Complex::new(0.0, 0.0),
+                                Complex::new(cx, cy),
+                                self.steps,
+                            ),
                         };
 
                         iteration
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .flatten()
             .collect();
 
-        let average_escape: usize = raw_escapes
+        let mut all_escapes: Vec<usize> = raw_escapes
             .iter()
             .filter_map(|x| match x {
-                IterResult::Outside(q) => Some(q),
-                IterResult::Inside(q) => None,
+                IterResult::Outside(q) => Some(*q),
+                IterResult::Inside(_) => None,
             })
-            .sum();
+            .collect();
 
-        let average_escape = average_escape as f32 / (x_size * y_size) as f32;
+        if all_escapes.len() < 5 {
+            return ColorImage::new([x_size, y_size], Color32::WHITE);
+        }
+
+        all_escapes.sort();
+        //let median_escape = all_escapes[all_escapes.len() / 2] as f32;
+        //let q2_escape = all_escapes[all_escapes.len() * 9 / 10] as f32;
+        let average_escape = all_escapes.iter().sum::<usize>() as f32 / (x_size * y_size) as f32;
+        dbg!(average_escape);
 
         //lighting func
-        let f = |q: f32| (q * 10.0).rem_euclid(1.0).sqrt() * 0.75;
+        let f = |q| {
+            let esc_idx = all_escapes.binary_search(&q).unwrap();
+            //let q = q as f32;
+            //let s = self.steps as f32;
+
+            let pct = esc_idx as f32 / all_escapes.len() as f32;
+            if pct > 0.5 {
+                let pct = (pct - 0.5) * (1.0 / 0.5);
+
+                Rgba::from(Hsva::new(pct, pct, 1.0, 1.0))
+            } else {
+                let pct = pct * (1.0 / 0.5);
+
+                Rgba::from(Hsva::new(1.0, 0.0, pct * 0.5, 1.0))
+            }
+            //if pct > 0.9 {
+            //Rgba::from_rgba_unmultiplied((pct - 0.8) * 5.0, 0.0, 0.0, 1.0)
+            //} else {
+            //Rgba::from_rgba_unmultiplied(0.5, pct, 1.0, 1.0)
+            //}
+        };
 
         let pixels: Vec<_> = raw_escapes
             .into_iter()
             .map(|q| match q {
-                IterResult::Outside(steps) => {
-                    let pct = steps as f32 / self.steps as f32;
-                    Rgba::from_rgba_unmultiplied(f(pct), f(pct), 0.0, 1.0)
-                }
+                IterResult::Outside(steps) => f(steps),
                 IterResult::Inside(_final) => Rgba::from_rgba_unmultiplied(1.0, 1.0, 1.0, 1.0),
             })
             .map(|c| c.to_srgba_unmultiplied())
@@ -264,16 +323,6 @@ impl MyApp {
             }
             None => {}
         }
-    }
-}
-
-fn get_xy<F: Fn(f32) -> f32>(z: Complex<FL>, c: Complex<FL>, step_max: usize, f: F) -> Rgba {
-    match iterate(z, c, step_max) {
-        IterResult::Outside(steps) => {
-            let pct = steps as f32 / step_max as f32;
-            Rgba::from_rgba_unmultiplied(f(pct), f(pct), 0.0, 1.0)
-        }
-        IterResult::Inside(_final) => Rgba::from_rgba_unmultiplied(1.0, 1.0, 1.0, 1.0),
     }
 }
 
@@ -383,7 +432,7 @@ impl eframe::App for MyApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.set_image(ui);
 
-            ui.add(egui::Slider::new(&mut self.view_data.steps, UNROLL..=10000).text("Steps"));
+            ui.add(egui::Slider::new(&mut self.view_data.steps, 32..=10000).text("Steps"));
             ui.add(
                 egui::Slider::new(&mut self.view_data.lighting_factor, 0.5..=4.0).text("Lighting"),
             );
