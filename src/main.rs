@@ -112,9 +112,11 @@ fn main() {
     );
 }
 
+#[derive(Debug)]
 struct ViewData {
     top_left: Complex<FL>,
     bottom_right: Complex<FL>,
+    lighting_factor: f32,
     steps: usize,
 }
 
@@ -131,7 +133,9 @@ impl ViewData {
                         let cx = tl.r + (x as FL / x_size as FL) * (br.r - tl.r);
                         let cy = tl.i - (y as FL / y_size as FL) * (tl.i - br.i);
 
-                        let c = get_xy(Complex::new(cx, cy), self.steps);
+                        let c = get_xy(Complex::new(cx, cy), self.steps, |q| {
+                            q.powf(1.0 / self.lighting_factor)
+                        });
                         c.to_srgba_unmultiplied()
                     })
                     .flatten()
@@ -148,17 +152,18 @@ impl ViewData {
         self.bottom_right += change;
     }
 
-    fn rel_move(&mut self, [x, y]: [i8; 2]) {
+    fn rel_move(&mut self, [x, y]: [FL; 2]) {
         let movespeed = self.bottom_right.r - self.top_left.r;
-        let d = Complex::new(x as FL, y as FL) * movespeed * 0.5;
+        let d = Complex::new(x as FL, y as FL) * movespeed * 0.25;
         self.pan(d);
     }
 
-    fn rel_zoom(&mut self, x: i8) {
+    fn rel_zoom(&mut self, x: FL) {
         let delta = self.bottom_right - self.top_left;
+        let delta = delta * 0.25;
 
-        self.top_left += delta * 0.25 * x as FL;
-        self.bottom_right += delta * -0.25 * x as FL;
+        self.top_left += delta * x;
+        self.bottom_right += delta * -1.0 * x;
     }
 }
 
@@ -183,11 +188,12 @@ impl MyApp {
     }
 }
 
-fn get_xy(c: Complex<FL>, step_max: usize) -> Rgba {
+fn get_xy<F: Fn(f32) -> f32>(c: Complex<FL>, step_max: usize, f: F) -> Rgba {
     //dbg!(&c);
     match iterate(c, step_max) {
         IterResult::Outside(steps) => {
-            Rgba::from_rgba_unmultiplied(0.0, steps as f32 / step_max as f32, 1.0, 1.0)
+            let pct = steps as f32 / step_max as f32;
+            Rgba::from_rgba_unmultiplied(f(pct), f(pct), 1.0, 1.0)
         }
         IterResult::Inside(_final) => Rgba::from_rgba_unmultiplied(1.0, 1.0, 1.0, 1.0),
     }
@@ -200,6 +206,7 @@ impl Default for MyApp {
         let top_left = Complex::new(-2.0, 1.0);
         let bottom_right = Complex::new(1.0, -1.0);
         let view_data = ViewData {
+            lighting_factor: 2.0,
             top_left,
             bottom_right,
             steps: 32,
@@ -229,12 +236,23 @@ impl eframe::App for MyApp {
 
                     use egui::Key::*;
                     let redraw = match key {
-                        ArrowDown => {self.view_data.rel_move([0, -1]); true},
-                        ArrowUp => {self.view_data.rel_move([0, 1]); true}
-                        ArrowLeft => {self.view_data.rel_move([-1, 0]); true}
-                        ArrowRight => {self.view_data.rel_move([1, 0]); true}
-                        Q => {self.view_data.rel_zoom(1); true}
-                        E => {self.view_data.rel_zoom(-1); true}
+                        ArrowDown => {self.view_data.rel_move([0.0, -1.0]); true},
+                        ArrowUp => {self.view_data.rel_move([0.0, 1.0]); true}
+                        ArrowLeft => {self.view_data.rel_move([-1.0, 0.0]); true}
+                        ArrowRight => {self.view_data.rel_move([1.0, 0.0]); true}
+                        Q => {self.view_data.rel_zoom(-1.0); true}
+                        E => {self.view_data.rel_zoom(1.0); true}
+                        P => {dbg!(&self.view_data); false}
+                        R => {
+                            let top_left = Complex::new(-2.0, 1.0);
+                            let bottom_right = Complex::new(1.0, -1.0);
+                            self.view_data = ViewData {
+                                top_left,
+                                bottom_right,
+                                ..self.view_data
+                            };
+                            true
+                        },
                         Escape => todo!(),
                         Tab => todo!(),
                         Backspace => todo!(),
@@ -276,7 +294,10 @@ impl eframe::App for MyApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.set_image(ui);
 
-            ui.add(egui::Slider::new(&mut self.view_data.steps, UNROLL..=100).text("Steps"));
+            ui.add(egui::Slider::new(&mut self.view_data.steps, UNROLL..=1000).text("Steps"));
+            ui.add(
+                egui::Slider::new(&mut self.view_data.lighting_factor, 0.5..=4.0).text("Lighting"),
+            );
 
             if ui.button("Regen").clicked() {
                 self.next_frame = Some(self.view_data.generate_view([600, 400]));
