@@ -1,7 +1,6 @@
 use eframe::egui;
-use egui::{Color32, ColorImage, Rgba, TextureHandle, TextureId, Ui};
-use itertools::Itertools;
-use num_traits::{Float, Num, Zero};
+use egui::{ColorImage, Rgba, TextureHandle, Ui};
+use num_traits::Num;
 use rayon::prelude::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -82,12 +81,42 @@ fn main() {
     );
 }
 
-struct MyApp {
-    steps: usize,
-    image_texture: Option<TextureHandle>,
-    next_frame: Option<ColorImage>,
+struct ViewData {
     top_left: Complex<FL>,
     bottom_right: Complex<FL>,
+    steps: usize,
+}
+
+impl ViewData {
+    fn generate_view(&self, [x_size, y_size]: [usize; 2]) -> ColorImage {
+        let pixels: Vec<u8> = (0..y_size)
+            .into_par_iter()
+            .map(|y| {
+                (0..x_size)
+                    .map(|x| {
+                        //transpose from screen pixel to complex point
+                        let (tl, br) = (self.top_left, self.bottom_right);
+
+                        let cx = tl.r + (x as FL / x_size as FL) * (br.r - tl.r);
+                        let cy = tl.i - (y as FL / y_size as FL) * (tl.i - br.i);
+
+                        let c = get_xy(Complex::new(cx, cy), self.steps);
+                        c.to_srgba_unmultiplied()
+                    })
+                    .flatten()
+                    .collect::<Vec<u8>>()
+            })
+            .flatten()
+            .collect();
+
+        ColorImage::from_rgba_unmultiplied([x_size, y_size], &pixels)
+    }
+}
+
+struct MyApp {
+    image_texture: Option<TextureHandle>,
+    next_frame: Option<ColorImage>,
+    view_data: ViewData,
 }
 
 impl MyApp {
@@ -117,39 +146,22 @@ fn get_xy(c: Complex<FL>, step_max: usize) -> Rgba {
 
 type FL = f64;
 
-fn generate_view(
-    [x_size, y_size]: [usize; 2],
-    top_left: Complex<FL>,
-    bot_right: Complex<FL>,
-    steps: usize,
-) -> ColorImage {
-    let pixels: Vec<u8> = (0..y_size)
-        .cartesian_product(0..x_size)
-        .map(|(y, x)| {
-            let cx = top_left.r + (x as FL / x_size as FL) * (bot_right.r - top_left.r);
-            let cy = top_left.i - (y as FL / y_size as FL) * (top_left.i - bot_right.i);
-
-            let c = get_xy(Complex::new(cx, cy), steps);
-            c.to_srgba_unmultiplied()
-        })
-        .flatten()
-        .collect();
-
-    ColorImage::from_rgba_unmultiplied([x_size, y_size], &pixels)
-}
-
 impl Default for MyApp {
     fn default() -> Self {
         let top_left = Complex::new(-2.0, 1.0);
         let bottom_right = Complex::new(1.0, -1.0);
-        let view = generate_view([400, 400], top_left, bottom_right, 10);
-
-        Self {
+        let view_data = ViewData {
             top_left,
             bottom_right,
-            steps: 10,
+            steps: 32,
+        };
+
+        let view = view_data.generate_view([600, 400]);
+
+        Self {
             next_frame: Some(view),
             image_texture: None,
+            view_data,
         }
     }
 }
@@ -159,26 +171,14 @@ impl eframe::App for MyApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.set_image(ui);
 
-            //ui.heading("My egui Application");
-            //ui.horizontal(|ui| {
-            //ui.label("Your name: ");
-            //ui.text_edit_singleline(&mut self.name);
-            //});
-            ui.add(egui::Slider::new(&mut self.steps, UNROLL..=100).text("Steps"));
+            ui.add(egui::Slider::new(&mut self.view_data.steps, UNROLL..=100).text("Steps"));
 
             if ui.button("Regen").clicked() {
-                self.next_frame = Some(generate_view(
-                    [400, 400],
-                    self.top_left,
-                    self.bottom_right,
-                    self.steps,
-                ));
+                self.next_frame = Some(self.view_data.generate_view([600, 400]));
             }
-            ui.label(format!("Steps: {}", self.steps));
 
             let t = self.image_texture.as_ref().unwrap();
             ui.image(t, t.size_vec2());
-            println!("yep");
         });
     }
 }
