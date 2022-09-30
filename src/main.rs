@@ -1,98 +1,29 @@
-use std::{fmt::Display, ops::AddAssign};
+use std::{f64::consts::E, fmt::Display};
 
 use eframe::egui;
 use egui::{color::Hsva, Color32, ColorImage, Event, Rgba, TextureHandle, Ui};
-use num_traits::{Float, Num};
+use num_traits::Float;
 use rayon::prelude::*;
 
-#[derive(Clone, Copy, Debug)]
-struct Complex<T> {
-    r: T,
-    i: T,
-}
+mod complex;
 
-impl<T: Display> Display for Complex<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.3} + {:.3}i", self.r, self.i)
-    }
-}
-
-impl<T: Num + Copy> Complex<T> {
-    fn new(r: T, i: T) -> Self {
-        Self { r, i }
-    }
-
-    fn len_sq(self) -> T {
-        self.r * self.r + self.i * self.i
-    }
-}
-
-impl<T: Num> std::ops::Add<Complex<T>> for Complex<T> {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self {
-        Self {
-            r: self.r + rhs.r,
-            i: self.i + rhs.i,
-        }
-    }
-}
-
-impl<T: Num> PartialEq<Complex<T>> for Complex<T> {
-    fn eq(&self, other: &Complex<T>) -> bool {
-        self.r == other.r && self.i == other.i
-    }
-}
-
-impl<T: Num> std::ops::Sub<Complex<T>> for Complex<T> {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self {
-        Self {
-            r: self.r - rhs.r,
-            i: self.i - rhs.i,
-        }
-    }
-}
-
-impl<T: Num + AddAssign> std::ops::AddAssign<Complex<T>> for Complex<T> {
-    fn add_assign(&mut self, rhs: Complex<T>) {
-        self.r += rhs.r;
-        self.i += rhs.i;
-    }
-}
-
-impl<T: Num + Copy> std::ops::Mul<Complex<T>> for Complex<T> {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self {
-        //(a + bi) * (c + di)
-        //a * c + a * di + c * bi - b * d
-        //ac + adi + bci - bd
-        //real: ac - bd
-        //imag: ad + bc
-        Self {
-            r: self.r * rhs.r - self.i * rhs.i,
-            i: self.r * rhs.i + self.i * rhs.r,
-        }
-    }
-}
-
-impl<T: Num + Copy> std::ops::Mul<T> for Complex<T> {
-    type Output = Self;
-
-    fn mul(self, rhs: T) -> Self {
-        Self {
-            r: self.r * rhs,
-            i: self.i * rhs,
-        }
-    }
-}
+use complex::Complex;
 
 #[derive(Debug, Eq, PartialEq)]
 enum IterResult<T> {
+    ///Outside the set, in this many iterations
     Outside(usize),
+    ///Inside the set, with this final value
     Inside(T),
+}
+
+impl<T: Display> Display for IterResult<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inside(i) => write!(f, "Inside({})", i),
+            Self::Outside(o) => write!(f, "Outside({})", o),
+        }
+    }
 }
 
 #[test]
@@ -121,16 +52,33 @@ fn test_all() {
             let z = Complex::new(0.0, 0.0);
             let c = Complex::new(x as f64 / 100.0, y as f64 / 100.0);
 
-            let a = iterate::<4, f64>(z, c, 100);
-            let b = iterate::<1, f64>(z, c, 100);
-            match (a, b) {
+            let max_iter = 300;
+            const PARALLEL_MAX: usize = 32;
+
+            let a = iterate::<PARALLEL_MAX, f64>(z, c, max_iter);
+            let b = iterate::<1, f64>(z, c, max_iter);
+            match (&a, &b) {
                 (Outside(p), Outside(q)) => assert_eq!(p, q),
+                (Outside(p), Inside(_)) if *p < (max_iter - PARALLEL_MAX) => {
+                    panic!("OI {c} {} {}", a, b)
+                }
+                (Inside(_), Outside(q)) if *q < (max_iter - PARALLEL_MAX) => {
+                    panic!("IO {c} {} {}", a, b)
+                }
                 _ => {}
             }
         }
     }
 }
 
+#[inline]
+fn iter_is_done<T: Float>(z: Complex<T>) -> bool {
+    z.r.is_nan()
+        || z.len_sq() > (T::one() + T::one() + T::one() + T::one())
+        || z.len_sq() < T::from(0.000001).unwrap()
+}
+
+///Perform `z = z^2 + c` to see if it inside or outisde the set
 fn iterate<const UNROLL: usize, T>(
     mut z: Complex<T>,
     c: Complex<T>,
@@ -139,27 +87,29 @@ fn iterate<const UNROLL: usize, T>(
 where
     T: Float + Copy + PartialOrd + std::fmt::Display,
 {
+    //optimize: only check if it is outside the set every UNROLL loops
     for i in 0..(times / UNROLL) {
         let last_z = z.clone();
-        for _ in 0..UNROLL {
+        for _q in 0..UNROLL {
             // z = z^2 + c
             z = z * z + c;
         }
-        if z.r.is_nan()
-            || z.len_sq() > (T::one() + T::one() + T::one() + T::one())
-            || z.len_sq() < T::from(0.00001).unwrap()
-        {
+        if iter_is_done(z) {
             if UNROLL == 1 {
                 return IterResult::Outside(i);
             }
 
+            //if we are done, we need to go back and step 1 at a time, to find exactly where it
+            //crosses
             z = last_z;
             for q in 0..UNROLL {
                 z = z * z + c;
-                if z.len_sq() > (T::one() + T::one() + T::one() + T::one()) {
+                if iter_is_done(z) {
                     return IterResult::Outside(i * UNROLL + q);
                 }
             }
+
+            unreachable!();
         }
     }
 
@@ -194,7 +144,7 @@ impl Mode {
 struct ViewData {
     top_left: Complex<FL>,
     bottom_right: Complex<FL>,
-    lighting_factor: f32,
+    //lighting_factor: f32,
     steps: usize,
     julia_offset: Complex<FL>,
     mode: Mode,
@@ -202,7 +152,10 @@ struct ViewData {
 
 impl ViewData {
     fn generate_view(&self, [x_size, y_size]: [usize; 2]) -> ColorImage {
+        // calculate each pixel in the image
+        // TODO get rid of allocations during this loop
         let raw_escapes: Vec<IterResult<Complex<FL>>> = (0..y_size)
+            //parallel (with rayon) to use all cpus
             .into_par_iter()
             .map(|y| {
                 (0..x_size)
@@ -259,7 +212,7 @@ impl ViewData {
             if pct > 0.5 {
                 let pct = (pct - 0.5) * (1.0 / 0.5);
 
-                Rgba::from(Hsva::new(pct, pct, 1.0, 1.0))
+                Rgba::from(Hsva::new(pct, 1.0, 0.8, 1.0))
             } else {
                 let pct = pct * (1.0 / 0.5);
 
@@ -276,7 +229,7 @@ impl ViewData {
             .into_iter()
             .map(|q| match q {
                 IterResult::Outside(steps) => f(steps),
-                IterResult::Inside(_final) => Rgba::from_rgba_unmultiplied(1.0, 1.0, 1.0, 1.0),
+                IterResult::Inside(_final) => Rgba::from_rgba_unmultiplied(0.0, 0.0, 0.0, 1.0),
             })
             .map(|c| c.to_srgba_unmultiplied())
             .flatten()
@@ -285,17 +238,20 @@ impl ViewData {
         ColorImage::from_rgba_unmultiplied([x_size, y_size], &pixels)
     }
 
+    ///Move the camera by some amount
     fn pan(&mut self, change: Complex<FL>) {
         self.top_left += change;
         self.bottom_right += change;
     }
 
+    ///This translates a binary key press (like [-1, 0] would be left arrow) into a pan
     fn rel_move(&mut self, [x, y]: [FL; 2]) {
         let movespeed = self.bottom_right.r - self.top_left.r;
         let d = Complex::new(x as FL, y as FL) * movespeed * 0.25;
         self.pan(d);
     }
 
+    ///Like rel_move, but zooming instead
     fn rel_zoom(&mut self, x: FL) {
         let delta = self.bottom_right - self.top_left;
         let delta = delta * 0.25;
@@ -332,18 +288,19 @@ impl Default for MyApp {
     fn default() -> Self {
         let top_left = Complex::new(-2.0, 1.0);
         let bottom_right = Complex::new(1.0, -1.0);
-        //let phi = (1.0 + (5.0 as FL).sqrt()) / 2.0;
-        //let phi = 1 - phi;
-        //let phi = 0.285;
-        let phi = 0.0;
-        let view_data = ViewData {
+        let mut view_data = ViewData {
             mode: Mode::Mandelbrot,
-            julia_offset: Complex::new(phi, 0.0),
-            lighting_factor: 2.0,
+            julia_offset: Complex::new(0.0, 0.0),
+            //lighting_factor: 2.0,
             top_left,
             bottom_right,
             steps: 128,
         };
+
+        view_data.pan(Complex::new(0.5, 0.0));
+        //view_data.pan(Complex::new(-0.77568377, 0.13646737)); // M(23, 2)
+        //view_data.pan(Complex::new(-E / 7.0, -E / 20.0));
+        view_data.pan(Complex::new(-0.16070135, 1.0375665));
 
         let view = view_data.generate_view([600, 400]);
 
@@ -429,13 +386,14 @@ impl eframe::App for MyApp {
                 _ => {}
             }
         }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             self.set_image(ui);
 
             ui.add(egui::Slider::new(&mut self.view_data.steps, 32..=10000).text("Steps"));
-            ui.add(
-                egui::Slider::new(&mut self.view_data.lighting_factor, 0.5..=4.0).text("Lighting"),
-            );
+            //ui.add(
+            //egui::Slider::new(&mut self.view_data.lighting_factor, 0.5..=4.0).text("Lighting"),
+            //);
 
             if self.view_data.mode == Mode::Julia {
                 ui.add(egui::Slider::new(&mut self.view_data.julia_offset.r, -1.0..=1.0).text("a"));
@@ -458,11 +416,11 @@ impl eframe::App for MyApp {
             )));
 
             if ui.button("Regen").clicked() {
-                self.next_frame = Some(self.view_data.generate_view([600, 400]));
+                self.next_frame = Some(self.view_data.generate_view([6000, 4000]));
             }
 
             let t = self.image_texture.as_ref().unwrap();
-            ui.image(t, t.size_vec2());
+            ui.image(t, (600.0, 400.0));
         });
     }
 }
